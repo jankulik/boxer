@@ -62,18 +62,20 @@ def find_ffmpeg(home, ffmpeg_binary=None):
 
 def get_video_codec():
     ffmpeg_binary = find_ffmpeg(os.path.expanduser("~"))
-    cmd = f"{ffmpeg_binary} -y -v quiet -codecs | grep 264"
+    cmd = f"{ffmpeg_binary} -hide_banner -loglevel error -encoders"
     result = str(subprocess.check_output(cmd, shell=True))
-    # "libfdk_aac" is better than "aac" because it works with quicktime
-    # If libfdk_aac is available, lets use it. On fedora desktop, it is not
-    # available unless you install from source, so use "aac" instead.
-    if "libx264" in result:  # available on OD-GPU
-        codec = "libx264"
-    elif "h264" in result:  # available on fedora
-        codec = "h264"
-    else:
-        raise ValueError("Cannot find a valid audio decoder")
-    return codec
+    preferred = [
+        "libx264",
+        "h264_nvenc",
+        "h264_qsv",
+        "h264_vaapi",
+        "h264_videotoolbox",
+        "mpeg4",
+    ]
+    for codec in preferred:
+        if codec in result:
+            return codec
+    raise ValueError("Cannot find a usable video encoder")
 
 
 def make_mp4(
@@ -92,13 +94,18 @@ def make_mp4(
         output_dir = input_dir
     mp4_path = os.path.join(output_dir, output_name)
     video_codec = get_video_codec()
+    codec_args = f"-c:v {video_codec} "
+    if video_codec == "libx264":
+        codec_args += (
+            f"-preset {preset} -crf {crf} "
+            f"-profile:v high -level 4.1 "
+        )
     cmd = (
         f"{ffmpeg_binary} -hide_banner -loglevel error -y "
         f"-framerate {framerate} -pattern_type glob "
         f"-i '{input_dir}/{image_glob}' "
         f"-vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' "
-        f"-c:v {video_codec} -preset {preset} -crf {crf} "
-        f"-profile:v high -level 4.1 "
+        f"{codec_args}"
         f"-pix_fmt yuv420p -movflags +faststart "
         f"{mp4_path}"
     )
