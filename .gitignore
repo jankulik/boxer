@@ -36,3 +36,5 @@ output/
 
 # ImGui
 imgui.ini
+
+*.codex
