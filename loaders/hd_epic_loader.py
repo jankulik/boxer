@@ -3,13 +3,12 @@
 # LICENSE file in the root directory of this source tree.
 
 # pyre-unsafe
-import csv
 import json
 import os
 import re
-import threading
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 
@@ -19,12 +18,6 @@ from utils.tw.camera import CameraTW
 from utils.tw.tensor_utils import find_nearest2
 
 HD_EPIC_VIDEO_ID_RE = re.compile(r"^(P0[1-9]-2024\d{4}-\d{6})$")
-
-
-def _cv2():
-    import cv2
-
-    return cv2
 
 
 def _create_vrs_provider(vrs_path: str):
@@ -41,9 +34,10 @@ def looks_like_hd_epic_input(value: str) -> bool:
     norm = value.replace("\\", "/")
     base = os.path.basename(norm)
     stem = os.path.splitext(base)[0]
+    stem = stem.removesuffix("_anonymized")
     if HD_EPIC_VIDEO_ID_RE.match(stem):
         return True
-    return "/HD-EPIC/" in norm or "/Videos/P0" in norm
+    return "/HD-EPIC/" in norm or "/VRS/P0" in norm
 
 
 def _candidate_hd_epic_roots(input_path: str, hd_epic_root: str | None = None) -> list[Path]:
@@ -80,107 +74,53 @@ def _candidate_hd_epic_roots(input_path: str, hd_epic_root: str | None = None) -
     return uniq
 
 
-def resolve_hd_epic_video_path(
+def _extract_hd_epic_video_id(path_or_id: str) -> str:
+    stem = Path(path_or_id).stem.removesuffix("_anonymized")
+    if not HD_EPIC_VIDEO_ID_RE.match(stem):
+        raise FileNotFoundError(
+            f"Could not infer an HD-EPIC video id from '{path_or_id}'. "
+            "Pass a video id like P08-20240614-085000 or a matching .vrs path."
+        )
+    return stem
+
+
+def resolve_hd_epic_vrs_path(
     input_path: str, hd_epic_root: str | None = None
 ) -> tuple[Path, str]:
     input_as_path = Path(input_path).expanduser()
     if input_as_path.exists():
-        video_path = input_as_path.resolve()
-        if video_path.suffix.lower() != ".mp4":
-            raise FileNotFoundError(f"HD-EPIC input must point to an .mp4 file, got: {video_path}")
-        video_id = video_path.stem
-        if not HD_EPIC_VIDEO_ID_RE.match(video_id):
-            raise FileNotFoundError(
-                f"Could not infer an HD-EPIC video id from filename: {video_path.name}"
-            )
-        return video_path, video_id
+        vrs_path = input_as_path.resolve()
+        if vrs_path.suffix.lower() != ".vrs":
+            raise FileNotFoundError(f"HD-EPIC input must point to a .vrs file, got: {vrs_path}")
+        return vrs_path, _extract_hd_epic_video_id(vrs_path.name)
 
-    video_id = Path(input_path).stem
-    if not HD_EPIC_VIDEO_ID_RE.match(video_id):
-        raise FileNotFoundError(
-            f"Could not resolve HD-EPIC input '{input_path}'. "
-            "Pass an HD-EPIC mp4 path or a video id like P08-20240614-085000."
-        )
+    video_id = _extract_hd_epic_video_id(input_path)
 
     participant = video_id.split("-")[0]
     for root in _candidate_hd_epic_roots(input_path, hd_epic_root):
         candidates = [
-            root / "Videos" / participant / f"{video_id}.mp4",
-            root / "HD-EPIC" / "Videos" / participant / f"{video_id}.mp4",
+            root / "VRS" / participant / f"{video_id}_anonymized.vrs",
+            root / "VRS" / participant / f"{video_id}.vrs",
+            root / "HD-EPIC" / "VRS" / participant / f"{video_id}_anonymized.vrs",
+            root / "HD-EPIC" / "VRS" / participant / f"{video_id}.vrs",
         ]
         for candidate in candidates:
             if candidate.exists():
                 return candidate.resolve(), video_id
 
     raise FileNotFoundError(
-        f"Could not find HD-EPIC video {video_id}. "
+        f"Could not find HD-EPIC VRS {video_id}. "
         "Looked under typical HD-EPIC roots; try --hd_epic_root."
     )
 
 
-def load_mp4_to_vrs_mapping(csv_path: str | os.PathLike) -> tuple[np.ndarray, np.ndarray]:
-    csv_path = Path(csv_path)
-    rows = []
-    with open(csv_path, "r", newline="") as f:
-        sample = f.read(4096)
-        f.seek(0)
-        has_header = csv.Sniffer().has_header(sample)
-        if has_header:
-            reader = csv.DictReader(f)
-            if reader.fieldnames is None:
-                raise ValueError(f"No columns found in {csv_path}")
-            fieldnames = [k for k in reader.fieldnames if k]
-            exact_time_keys = [
-                "vrs_device_time_ns",
-                "device_time_ns",
-            ]
-            time_key = next((k for k in exact_time_keys if k in fieldnames), None)
-            if time_key is None:
-                time_key = next(
-                    (
-                        k
-                        for k in fieldnames
-                        if (
-                            "vrs" in k.lower()
-                            and "time" in k.lower()
-                            and "ns" in k.lower()
-                            and "relative" not in k.lower()
-                        )
-                    ),
-                    None,
-                )
-            if time_key is None:
-                numeric_candidates = [
-                    k
-                    for k in fieldnames
-                    if k and ("time" in k.lower() or "ns" in k.lower())
-                ]
-                time_key = numeric_candidates[-1] if numeric_candidates else reader.fieldnames[-1]
-            for frame_idx, row in enumerate(reader):
-                rows.append((frame_idx, int(float(row[time_key]))))
-        else:
-            reader = csv.reader(f)
-            for frame_idx, row in enumerate(reader):
-                if len(row) < 2:
-                    continue
-                rows.append((frame_idx, int(float(row[-1]))))
-
-    if not rows:
-        raise ValueError(f"No frame/timestamp rows found in {csv_path}")
-
-    rows.sort(key=lambda x: x[0])
-    frame_ids = np.array([r[0] for r in rows], dtype=np.int64)
-    time_ns = np.array([r[1] for r in rows], dtype=np.int64)
-    return frame_ids, time_ns
-
-
 def resolve_hd_epic_slam_root(
-    video_path: str | os.PathLike, video_id: str, hd_epic_root: str | None = None
+    vrs_path: str | os.PathLike, video_id: str, hd_epic_root: str | None = None
 ) -> Path:
-    video_path = Path(video_path).expanduser().resolve()
+    vrs_path = Path(vrs_path).expanduser().resolve()
     participant = video_id.split("-")[0]
     multi_roots = []
-    for root in _candidate_hd_epic_roots(str(video_path), hd_epic_root):
+    for root in _candidate_hd_epic_roots(str(vrs_path), hd_epic_root):
         multi_roots.extend(
             [
                 root / "SLAM-and-Gaze" / participant / "SLAM" / "multi",
@@ -226,25 +166,6 @@ def resolve_hd_epic_slam_root(
         f"Checked: {checked}. Try --hd_epic_root or extract the matching multi-SLAM zip."
     )
 
-
-def resolve_hd_epic_vrs_path(
-    video_path: str | os.PathLike, video_id: str, hd_epic_root: str | None = None
-) -> Path | None:
-    video_path = Path(video_path).expanduser().resolve()
-    participant = video_id.split("-")[0]
-    for root in _candidate_hd_epic_roots(str(video_path), hd_epic_root):
-        candidates = [
-            root / "VRS" / participant / f"{video_id}_anonymized.vrs",
-            root / "VRS" / participant / f"{video_id}.vrs",
-            root / "HD-EPIC" / "VRS" / participant / f"{video_id}_anonymized.vrs",
-            root / "HD-EPIC" / "VRS" / participant / f"{video_id}.vrs",
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate.resolve()
-    return None
-
-
 class HDEpicLoader(BaseLoader):
     def __init__(
         self,
@@ -268,22 +189,14 @@ class HDEpicLoader(BaseLoader):
         sdp_frame_alignment_s=0.015,
         use_global_sdp_for_rgb=True,
         global_sdp_max_points=50000,
-        rotate_rgb_camera_90_cw=True,
-        use_vrs_when_available=True,
     ):
         if camera != "rgb":
             raise ValueError("HD-EPIC video loader currently supports only --camera rgb")
         if with_obb:
             raise ValueError("HD-EPIC does not currently support --gt2d / ground-truth 2D boxes")
 
-        self.video_path, self.video_id = resolve_hd_epic_video_path(input_path, hd_epic_root)
-        self.mapping_path = self.video_path.with_name(f"{self.video_id}_mp4_to_vrs_time_ns.csv")
-        if not self.mapping_path.exists():
-            raise FileNotFoundError(
-                f"Missing HD-EPIC frame mapping CSV: {self.mapping_path}. "
-                "Download the Videos bundle, not just the mp4."
-            )
-        self.slam_root = resolve_hd_epic_slam_root(self.video_path, self.video_id, hd_epic_root)
+        self.vrs_path, self.video_id = resolve_hd_epic_vrs_path(input_path, hd_epic_root)
+        self.slam_root = resolve_hd_epic_slam_root(self.vrs_path, self.video_id, hd_epic_root)
 
         self.camera = camera
         self.device_name = "HD-EPIC"
@@ -302,12 +215,10 @@ class HDEpicLoader(BaseLoader):
         self.sdp_frame_alignment_s = sdp_frame_alignment_s
         self.use_global_sdp_for_rgb = use_global_sdp_for_rgb
         self.global_sdp_max_points = global_sdp_max_points
-        self.rotate_rgb_camera_90_cw = rotate_rgb_camera_90_cw
-        self.use_vrs_when_available = use_vrs_when_available
         self._skip_debug_count = 0
 
         print("==> loading HDEpicLoader with the following settings:")
-        print(f"video_path: {self.video_path}")
+        print(f"vrs_path: {self.vrs_path}")
         print(f"slam_root: {self.slam_root}")
         print(f"camera: {camera}")
         print(f"with_img: {with_img}")
@@ -324,39 +235,11 @@ class HDEpicLoader(BaseLoader):
         print(f"sdp_frame_alignment_s: {sdp_frame_alignment_s}")
         print(f"use_global_sdp_for_rgb: {use_global_sdp_for_rgb}")
         print(f"global_sdp_max_points: {global_sdp_max_points}")
-        print(f"rotate_rgb_camera_90_cw: {rotate_rgb_camera_90_cw}")
-        print(f"use_vrs_when_available: {use_vrs_when_available}")
 
-        self.frame_ids, self.frame_time_ns = load_mp4_to_vrs_mapping(self.mapping_path)
-        self.vrs_path = (
-            resolve_hd_epic_vrs_path(self.video_path, self.video_id, hd_epic_root)
-            if self.use_vrs_when_available
-            else None
-        )
-        self._use_vrs = self.vrs_path is not None
-        if self._use_vrs:
-            print(f"==> HD-EPIC will use VRS images from {self.vrs_path}")
-        else:
-            print("==> HD-EPIC will use mp4 images (no matching VRS found)")
-
-        self._cap = None
-        self._cap_lock = threading.Lock()
-        self.provider = None
-        self.stream_id = None
-        if self._use_vrs:
-            self.provider = _create_vrs_provider(str(self.vrs_path))
-            self.stream_id = self.provider.get_stream_id_from_label("camera-rgb")
-            usable = int(self.provider.get_num_data(self.stream_id))
-        else:
-            self._cap = _cv2().VideoCapture(str(self.video_path))
-            if not self._cap.isOpened():
-                raise IOError(f"Failed to open HD-EPIC video: {self.video_path}")
-            frame_count = int(self._cap.get(_cv2().CAP_PROP_FRAME_COUNT))
-            if frame_count <= 0:
-                frame_count = len(self.frame_ids)
-            usable = min(frame_count, len(self.frame_ids))
-            self.frame_ids = self.frame_ids[:usable]
-            self.frame_time_ns = self.frame_time_ns[:usable]
+        print(f"==> HD-EPIC will use VRS images from {self.vrs_path}")
+        self.provider = _create_vrs_provider(str(self.vrs_path))
+        self.stream_id = self.provider.get_stream_id_from_label("camera-rgb")
+        usable = int(self.provider.get_num_data(self.stream_id))
         if usable == 0:
             raise ValueError(f"No frames available for {self.video_id}")
 
@@ -413,16 +296,10 @@ class HDEpicLoader(BaseLoader):
         valid_start = start_n
         valid_end = usable - 1
         if self.restrict_range:
-            if self._use_vrs:
-                _, first_record = self.provider.get_image_data_by_index(self.stream_id, 0)
-                _, last_record = self.provider.get_image_data_by_index(
-                    self.stream_id, usable - 1
-                )
-                image_start_ns = int(first_record.capture_timestamp_ns)
-                image_end_ns = int(last_record.capture_timestamp_ns)
-            else:
-                image_start_ns = int(self.frame_time_ns[0])
-                image_end_ns = int(self.frame_time_ns[-1])
+            _, first_record = self.provider.get_image_data_by_index(self.stream_id, 0)
+            _, last_record = self.provider.get_image_data_by_index(self.stream_id, usable - 1)
+            image_start_ns = int(first_record.capture_timestamp_ns)
+            image_end_ns = int(last_record.capture_timestamp_ns)
             modality_starts = [image_start_ns]
             modality_ends = [image_end_ns]
             if self.with_traj and len(self.pose_ts) > 0:
@@ -433,15 +310,8 @@ class HDEpicLoader(BaseLoader):
                 modality_ends.append(int(self.sdp_times.max()))
             start_ns = max(modality_starts)
             end_ns = min(modality_ends)
-            if self._use_vrs:
-                valid_start = max(valid_start, self._find_vrs_frame_by_timestamp(start_ns))
-                valid_end = min(valid_end, self._find_vrs_frame_by_timestamp(end_ns))
-            else:
-                valid_mask = (self.frame_time_ns >= start_ns) & (self.frame_time_ns <= end_ns)
-                valid_indices = np.nonzero(valid_mask)[0]
-                if len(valid_indices) > 0:
-                    valid_start = max(valid_start, int(valid_indices[0]))
-                    valid_end = min(valid_end, int(valid_indices[-1]))
+            valid_start = max(valid_start, self._find_vrs_frame_by_timestamp(start_ns))
+            valid_end = min(valid_end, self._find_vrs_frame_by_timestamp(end_ns))
 
         if valid_start > valid_end:
             raise ValueError(f"No overlapping HD-EPIC frames remain for {self.video_id}")
@@ -484,15 +354,6 @@ class HDEpicLoader(BaseLoader):
 
         self._init_prefetch()
 
-    def _read_frame(self, frame_idx: int) -> np.ndarray:
-        cv2 = _cv2()
-        with self._cap_lock:
-            self._cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ok, frame_bgr = self._cap.read()
-        if not ok or frame_bgr is None:
-            raise IOError(f"Failed to read frame {frame_idx} from {self.video_path}")
-        return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
     def _find_vrs_frame_by_timestamp(self, target_ns: int) -> int:
         lo, hi = 0, self.provider.get_num_data(self.stream_id) - 1
         while lo < hi:
@@ -505,10 +366,8 @@ class HDEpicLoader(BaseLoader):
         return lo
 
     def _frame_timestamp_ns(self, frame_idx: int) -> int:
-        if self._use_vrs:
-            _, record = self.provider.get_image_data_by_index(self.stream_id, frame_idx)
-            return int(record.capture_timestamp_ns)
-        return int(self.frame_time_ns[frame_idx])
+        _, record = self.provider.get_image_data_by_index(self.stream_id, frame_idx)
+        return int(record.capture_timestamp_ns)
 
     def _read_vrs_rgb(self, frame_idx: int):
         data, record = self.provider.get_image_data_by_index(self.stream_id, frame_idx)
@@ -516,19 +375,13 @@ class HDEpicLoader(BaseLoader):
             raise IOError(f"Invalid VRS image data at frame {frame_idx} in {self.vrs_path}")
         img = data.to_numpy_array()
         if img.ndim == 2:
-            img = _cv2().cvtColor(img, _cv2().COLOR_GRAY2RGB)
+            img = np.repeat(img[:, :, None], 3, axis=2)
         return img, int(record.capture_timestamp_ns)
 
     def _build_camera(self, ts_ns: int, frame_w: int, frame_h: int):
         calib_idx = find_nearest2(self.calib_ts, ts_ns)
         cam_fish = self.calibs[calib_idx].float()
         cam = cam_fish.scale_to_size((frame_w, frame_h)).float()
-        # Raw VRS images should follow the same convention as AriaLoader:
-        # keep the camera in the native orientation and let `rotated0`
-        # tell downstream code how to display/project the image.
-        if self.rotate_rgb_camera_90_cw and not self._use_vrs:
-            cam_fish = cam_fish.rotate_90_cw().float()
-            cam = cam.rotate_90_cw().float()
 
         resize = self.resize
         if resize is not None:
@@ -565,13 +418,8 @@ class HDEpicLoader(BaseLoader):
 
     def load(self, idx):
         frame_idx = self.sample_indices[idx]
-        if self._use_vrs:
-            img, ts_ns = self._read_vrs_rgb(frame_idx)
-            rotated = torch.tensor([True])
-        else:
-            ts_ns = int(self.frame_time_ns[frame_idx])
-            img = self._read_frame(int(self.frame_ids[frame_idx]))
-            rotated = torch.tensor([False])
+        img, ts_ns = self._read_vrs_rgb(frame_idx)
+        rotated = torch.tensor([True])
         frame_h, frame_w = img.shape[:2]
         cam, cam_fish, resize_h, resize_w, pinhole_cam = self._build_camera(
             ts_ns, frame_w, frame_h
@@ -579,7 +427,6 @@ class HDEpicLoader(BaseLoader):
 
         img_proc = img
         if resize_h != frame_h or resize_w != frame_w:
-            cv2 = _cv2()
             img_proc = cv2.resize(img_proc, (resize_w, resize_h), interpolation=cv2.INTER_LINEAR)
         img_torch = torch.from_numpy(img_proc).permute(2, 0, 1)[None].float() / 255.0
 

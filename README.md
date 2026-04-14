@@ -63,13 +63,13 @@ Expected to take ~2 mins on mac MPS, <15 secs on CUDA.
 python run_boxer.py --input nym10_gen1 --max_n=90 --track
 ```
 
-HD-EPIC videos are also supported. Boxer uses the anonymized `.mp4`, the matching
-`*_mp4_to_vrs_time_ns.csv`, and the extracted `SLAM-and-Gaze/<participant>/SLAM/multi/<id>/slam/`
-folder for calibration, trajectory, and semi-dense points:
+HD-EPIC videos are also supported. Boxer uses the HD-EPIC RGB `.vrs` together with the
+extracted `SLAM-and-Gaze/<participant>/SLAM/multi/<id>/slam/` folder for calibration,
+trajectory, and semi-dense points:
 
 ```bash
 python run_boxer.py --input P08-20240614-085000 --hd_epic_root /path/to/HD-EPIC
-python run_boxer.py --input /path/to/HD-EPIC/Videos/P08/P08-20240614-085000.mp4 --hd_epic_root /path/to/HD-EPIC
+python run_boxer.py --input /path/to/HD-EPIC/VRS/P08/P08-20240614-085000_anonymized.vrs --hd_epic_root /path/to/HD-EPIC
 ```
 
 This will dump out static images and a video to `outputs/nym10_gen1/`, e.g. something like this in `outputs/nym10_gen1/boxer_viz_current.png`
