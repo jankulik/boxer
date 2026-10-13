@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from boxernet.boxernet import BoxerNet
 from loaders.ca_loader import CALoader
+from loaders.hd_epic_loader import HDEpicLoader, looks_like_hd_epic_input
 from loaders.omni_loader import OMNI3D_DATASETS, OmniLoader
 from loaders.scannet_loader import ScanNetLoader
 from utils.demo_utils import (
@@ -113,6 +114,7 @@ def main():
     parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in4x6d768-wssxpf9p.ckpt"), help="path to BoxerNet checkpoint")
     parser.add_argument("--force_precision", type=str, default=None, choices=["float32", "bfloat16"], help="Override auto-detected inference precision")
     parser.add_argument("--output_dir", type=str, default=EVAL_PATH, help="Output directory for results (default: output/)")
+    parser.add_argument("--hd_epic_root", type=str, default=None, help="Optional HD-EPIC dataset root when using HD-EPIC videos or video ids")
     args = parser.parse_args()
 
     if args.fuse and args.track:
@@ -148,6 +150,9 @@ def main():
     elif args.input.startswith("ca1m"):
         dataset_type = "ca1m"
         seq_name = args.input
+    elif looks_like_hd_epic_input(args.input):
+        dataset_type = "hdepic"
+        seq_name = os.path.splitext(os.path.basename(args.input.rstrip("/")))[0]
     else:
         dataset_type = "aria"
         remote_root = args.input
@@ -231,6 +236,22 @@ def main():
             skip_frames=args.skip_n,
             max_frames=args.max_n,
             resize=(args.detector_hw, args.detector_hw),
+        )
+    elif dataset_type == "hdepic":
+        if args.gt2d:
+            parser.error("--gt2d is not supported for HD-EPIC videos")
+        loader = HDEpicLoader(
+            args.input,
+            hd_epic_root=args.hd_epic_root,
+            camera=args.camera,
+            with_traj=True,
+            with_sdp=True,
+            with_obb=False,
+            pinhole=args.pinhole,
+            resize=None,
+            skip_n=args.skip_n,
+            max_n=args.max_n,
+            start_n=args.start_n,
         )
     else:
         from loaders.aria_loader import AriaLoader

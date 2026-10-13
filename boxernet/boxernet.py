@@ -545,7 +545,7 @@ class BoxerNet(nn.Module):
         assert self.cross_depth >= 1, "cross_depth must be at least 1"
 
         dinov3_model_name = "dinov3_vits16plus"
-        self.dino = DinoV3Wrapper(dinov3_model_name)
+        self.dino = DinoV3Wrapper(dinov3_model_name, weights_path=cfg.get("dinov3_weights_path"))
         if torch.cuda.is_available():
             self.dino = self.dino.cuda()
         for param in self.dino.parameters():
@@ -569,7 +569,7 @@ class BoxerNet(nn.Module):
         self.cross_attn = AttentionBlockV2(self.dim, self.cross_depth, self.heads)
 
     @classmethod
-    def load_from_checkpoint(cls, ckpt_path, device="cuda"):
+    def load_from_checkpoint(cls, ckpt_path, device="cuda", dinov3_weights_path=None):
         if device == "cuda":
             assert torch.cuda.is_available()
         elif device == "mps":
@@ -584,6 +584,8 @@ class BoxerNet(nn.Module):
         print(f'Loading checkpoint from "{ckpt_path}"')
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         cfg = ckpt["cfg"]
+        if dinov3_weights_path is not None:
+            cfg["model"]["dinov3_weights_path"] = dinov3_weights_path
         hw = cfg["dataset"]["image_hw"]
 
         model = cls(cfg["model"])

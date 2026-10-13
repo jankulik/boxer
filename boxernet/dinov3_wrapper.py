@@ -1516,10 +1516,11 @@ class DinoV3Wrapper(torch.nn.Module):
     def __init__(
         self,
         model_name: str = "dinov3_vits16plus",
+        weights_path: str | None = None,
     ):
         super().__init__()
         suffix = DINOV3_NAME_TO_SUFFIX[model_name]
-        weights_path = os.path.join(CKPT_PATH, f"{model_name}{suffix}")
+        weights_path = weights_path or os.path.join(CKPT_PATH, f"{model_name}{suffix}")
         model = DINOV3_MODEL_FUNC[model_name](pretrained=True, weights=weights_path)
         model.eval()
         self.model = model

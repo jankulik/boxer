@@ -376,6 +376,7 @@ def load_semidense(
     max_depth_std=0.05,
     max_inv_depth_std=0.005,
     force_reload=False,
+    cache_root=None,
 ):
     if os.path.exists(calib_path):
         serial2label = {}
@@ -399,7 +400,8 @@ def load_semidense(
 
     print("Loading semi-dense point global properties")
     point_start = time.time()
-    cache_dir = os.path.dirname(global_path)
+    cache_dir = cache_root or os.path.dirname(global_path)
+    os.makedirs(cache_dir, exist_ok=True)
     point_cache = os.path.join(
         cache_dir,
         f"cache_global_ds{max_depth_std:.04f}_ids{max_inv_depth_std:.05f}.pkl",
@@ -430,7 +432,8 @@ def load_semidense(
 
     print("Loading observations")
     obs_start = time.time()
-    cache_dir = os.path.dirname(obs_path)
+    cache_dir = cache_root or os.path.dirname(obs_path)
+    os.makedirs(cache_dir, exist_ok=True)
     obs_cache = os.path.join(
         cache_dir, f"cache_obs_ds{max_depth_std:.04f}_ids{max_inv_depth_std:.05f}.pkl"
     )

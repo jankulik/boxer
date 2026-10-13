@@ -91,6 +91,14 @@ class AriaLoader(BaseLoader):
         obb_min_size=0.02,  # remove small boxes based on 2D box size.
         obb_max_depth=None,  # Max distance (meters) from camera to keep OBBs
         restrict_range=True,  # restrict frames to intersection of modality time ranges.
+        vrs_path=None,
+        mps_root=None,
+        online_calib_path=None,
+        closed_loop_trajectory_path=None,
+        semidense_points_path=None,
+        semidense_observations_path=None,
+        semidense_cache_root=None,
+        local_root=None,
     ):
         self.camera = camera
         self.with_img = with_img
@@ -121,15 +129,20 @@ class AriaLoader(BaseLoader):
         print(f"is_adt: {is_adt} (auto-detected if 'auto')")
         print(f"restrict_range: {restrict_range}")
 
-        if remote_root.endswith("vrs"):
+        if vrs_path is not None:
+            vrs_path = os.path.expanduser(str(vrs_path))
+            remote_root = os.path.dirname(vrs_path)
+        elif remote_root.endswith("vrs"):
             vrs_path = remote_root
             remote_root = os.path.dirname(vrs_path)
         else:
             vrs_path = remote_root + "/main.vrs"
 
         seq_name = os.path.basename(remote_root)
-        local_root = os.path.expanduser("~/boxy_data")
-        local_root = os.path.join(local_root, seq_name)
+        if local_root is None:
+            local_root = os.path.join(os.path.expanduser("~/boxy_data"), seq_name)
+        else:
+            local_root = os.path.expanduser(str(local_root))
         # Data is assumed to be local
         self.vrs_path = vrs_path
         self.remote_root = remote_root
@@ -146,6 +159,36 @@ class AriaLoader(BaseLoader):
             f"==> SST loader using vrs file '{vrs_path}' and local seq '{self.local_root}'"
         )
 
+        if mps_root is not None:
+            mps_root = os.path.expanduser(str(mps_root))
+        if online_calib_path is None:
+            online_calib_path = os.path.join(
+                mps_root or remote_root, "online_calibration.jsonl"
+            )
+        if closed_loop_trajectory_path is None:
+            closed_loop_trajectory_path = os.path.join(
+                mps_root or remote_root, "closed_loop_trajectory.csv"
+            )
+        if semidense_points_path is None:
+            semidense_points_path = os.path.join(
+                mps_root or remote_root, "semidense_points.csv.gz"
+            )
+        if semidense_observations_path is None:
+            semidense_observations_path = os.path.join(
+                mps_root or remote_root, "semidense_observations.csv.gz"
+            )
+        self.online_calib_path = os.path.expanduser(str(online_calib_path))
+        self.closed_loop_trajectory_path = os.path.expanduser(
+            str(closed_loop_trajectory_path)
+        )
+        self.semidense_points_path = os.path.expanduser(str(semidense_points_path))
+        self.semidense_observations_path = os.path.expanduser(
+            str(semidense_observations_path)
+        )
+        if semidense_cache_root is None:
+            semidense_cache_root = local_root
+        self.semidense_cache_root = os.path.expanduser(str(semidense_cache_root))
+
         with _suppress_stderr():
             self.provider = data_provider.create_vrs_data_provider(vrs_path)
 
@@ -157,8 +200,9 @@ class AriaLoader(BaseLoader):
         self.device_name = "Aria Gen 2" if self.is_nebula else "Aria Gen 1"
         print(f"==> Device: {self.device_name} (type={device_type})")
 
-        calib_path = os.path.join(remote_root, "online_calibration.jsonl")
-        slaml_calibs, slamr_calibs, rgb_calibs, calib_ns = load_online_calib(calib_path)
+        slaml_calibs, slamr_calibs, rgb_calibs, calib_ns = load_online_calib(
+            self.online_calib_path
+        )
         self.calibs = []
         self.stream_id = []
         # fmt: off
@@ -191,14 +235,14 @@ class AriaLoader(BaseLoader):
 
         # If target_time_ns is provided, binary search to find the frame
         if target_time_ns is not None:
-            start_n = self._find_frame_by_timestamp(target_time_ns)
+            start_n = self.find_frame_by_timestamp(target_time_ns)
             max_n = 1
             skip_n = 1
             print(f"==> target_time_ns={target_time_ns} -> start_n={start_n}")
 
         # If start_ts is provided, find the corresponding frame index
         if start_ts is not None:
-            start_n = self._find_frame_by_timestamp(start_ts)
+            start_n = self.find_frame_by_timestamp(start_ts)
             print(f"==> start_ts={start_ts} -> start_n={start_n}")
 
         total_frames = self.provider.get_num_data(self.stream_id[0])
@@ -214,8 +258,7 @@ class AriaLoader(BaseLoader):
 
         # Auto-detect gravity direction if is_adt="auto"
         if is_adt == "auto":
-            traj_path = remote_root + "/closed_loop_trajectory.csv"
-            gravity_dir = probe_gravity_direction(traj_path)
+            gravity_dir = probe_gravity_direction(self.closed_loop_trajectory_path)
             if gravity_dir == "y":
                 print("=" * 60)
                 print("AUTO-DETECTED Y-UP GRAVITY COORDINATE SYSTEM")
@@ -238,9 +281,8 @@ class AriaLoader(BaseLoader):
 
         if self.with_traj:
             print("==> loading trajectory")
-            traj_path = remote_root + "/closed_loop_trajectory.csv"
             traj, pose_ts = load_closed_loop_trajectory(
-                traj_path, subsample=5, grav_y=self.is_adt
+                self.closed_loop_trajectory_path, subsample=5, grav_y=self.is_adt
             )
             # Transform Y-up to Z-up if needed
             if self.is_adt:
@@ -252,10 +294,12 @@ class AriaLoader(BaseLoader):
 
         if self.with_sdp:
             print("==> loading points")
-            global_path = os.path.join(remote_root, "semidense_points.csv.gz")
-            obs_path = os.path.join(remote_root, "semidense_observations.csv.gz")
             time_to_uids_slaml, time_to_uids_slamr, uid_to_p3 = load_semidense(
-                global_path, obs_path, calib_path, force_reload=self.force_reload
+                self.semidense_points_path,
+                self.semidense_observations_path,
+                self.online_calib_path,
+                force_reload=self.force_reload,
+                cache_root=self.semidense_cache_root,
             )
             self.time_to_uids_slaml = time_to_uids_slaml
             self.time_to_uids_slamr = time_to_uids_slamr
@@ -379,8 +423,8 @@ class AriaLoader(BaseLoader):
             if valid_range is not None:
                 valid_start_ns, valid_end_ns = valid_range
                 # Find frame indices that fall within the valid time range
-                valid_start_frame = self._find_frame_by_timestamp(valid_start_ns)
-                valid_end_frame = self._find_frame_by_timestamp(valid_end_ns)
+                valid_start_frame = self.find_frame_by_timestamp(valid_start_ns)
+                valid_end_frame = self.find_frame_by_timestamp(valid_end_ns)
                 # Clamp valid_end to VRS bounds
                 valid_end_frame = min(valid_end_frame, self.length - 1)
                 # Apply start_n as minimum starting point
@@ -617,8 +661,8 @@ class AriaLoader(BaseLoader):
 
         print()
 
-    def _find_frame_by_timestamp(self, target_ns):
-        """Binary search to find frame index closest to target timestamp."""
+    def find_frame_by_timestamp(self, target_ns):
+        """Return the image frame index closest to the target timestamp."""
         stream_id = self.stream_id[0]
         lo, hi = 0, self.provider.get_num_data(stream_id) - 1
         while lo < hi:
@@ -628,7 +672,23 @@ class AriaLoader(BaseLoader):
                 lo = mid + 1
             else:
                 hi = mid
+        if lo == 0:
+            return lo
+        _, after_record = self.provider.get_image_data_by_index(stream_id, lo)
+        _, before_record = self.provider.get_image_data_by_index(stream_id, lo - 1)
+        before_delta_ns = abs(before_record.capture_timestamp_ns - target_ns)
+        after_delta_ns = abs(after_record.capture_timestamp_ns - target_ns)
+        if before_delta_ns <= after_delta_ns:
+            return lo - 1
         return lo
+
+    def _find_frame_by_timestamp(self, target_ns):
+        """Deprecated alias for find_frame_by_timestamp."""
+        return self.find_frame_by_timestamp(target_ns)
+
+    def load_by_timestamp(self, target_ns):
+        """Load the image frame closest to the target timestamp."""
+        return self.load(self.find_frame_by_timestamp(target_ns))
 
     def __len__(self):
         return self.iter_length
